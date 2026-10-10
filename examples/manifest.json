@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "postgresMajor": 17,
+  "systemIdentifier": "7612345678901234567",
+  "timeline": 1,
+  "documentdbVersion": "1.0-0",
+  "validFromLsn": "0/1000000",
+  "validToLsn": "0/3000000",
+  "relations": [
+    {
+      "kind": "collections_catalog",
+      "tblspaceOid": 1663,
+      "databaseOid": 5,
+      "relfilenode": 18468
+    },
+    {
+      "kind": "document",
+      "tblspaceOid": 1663,
+      "databaseOid": 16384,
+      "relfilenode": 24576,
+      "collectionId": 1,
+      "database": "example",
+      "collection": "documents"
+    }
+  ]
+}
