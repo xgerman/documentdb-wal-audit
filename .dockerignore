@@ -1,0 +1,8 @@
+.git
+build
+demo-output
+.cache
+**/__pycache__
+*.pyc
+.wal-reader-tests-*
+tests/mongo/artifacts

@@ -1,0 +1,28 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-major: [16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test against matching PostgreSQL
+        run: |
+          docker build --target test \
+            --build-arg PG_MAJOR=${{ matrix.postgres-major }} \
+            -t documentdb-wal-audit-test:pg${{ matrix.postgres-major }} .
+      - name: Build runtime image
+        run: |
+          docker build --build-arg PG_MAJOR=${{ matrix.postgres-major }} \
+            -t documentdb-wal-audit:pg${{ matrix.postgres-major }} .
+          docker run --rm documentdb-wal-audit:pg${{ matrix.postgres-major }} --version
