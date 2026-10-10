@@ -5,291 +5,50 @@ Native C offline inspection of PostgreSQL WAL from unmodified
 `XLogReader` and libbson. No Python runtime, database connection, replication
 slot, extension changes, triggers, or audit tables are required.
 
-## Scope
+## Use the command-line tool
 
-The initial core reads WAL with matching PostgreSQL frontend support,
-reconstructs transaction outcomes, and reports ordinary physical heap effects.
-An optional relation manifest supplies DocumentDB namespace mappings and
-enables decoding of available ordinary tuple/BSON bytes.
-Recognized ordinary heap inserts and multi-inserts, updates (including HOT
-updates), and deletes become document events. Other records can be reported with
-`--show-postgres-records`; without a manifest there are no named document
-events.
-Version 2 manifests can also identify
-`documentdb_api_catalog.collections`. The decoder reconstructs available
-ordinary and multi-insert catalog tuples, folds committed transaction and
-subtransaction mutations, and emits inferred database/collection/view create,
-rename, and drop lifecycle events. These are catalog state transitions, never
-claims about the original MongoDB command.
-Transaction handling includes subtransaction attribution and prepared
-commit/rollback outcomes when the required records are present; a prepare
-record alone is not a known commit.
+The executable reads archived WAL, writes audit events to stdout, and writes
+diagnostics to stderr. Use the binary compiled for the PostgreSQL major that
+produced the WAL.
 
-Physical effects are not the original MongoDB command. WAL can omit old tuple
-images, document bytes, transaction outcomes, and historical relation mappings.
-Missing information remains unresolved rather than invented.
-
-Prefix/suffix heap updates are reconstructed with PostgreSQL-major-specific
-redo rules when the predecessor TID is available from prior WAL or a restored
-full-page image in the private SQLite cache. The recovered tuple is decoded
-through the same BSON validator as a fully logged tuple; `before` remains null
-unless WAL independently logged it.
-
-**Not shipped:** full TOAST reconstruction, index lifecycle decoding, offline
-data-directory (`pgdata`) bootstrap, and complete maintenance/pruning coverage.
-The expanded interfaces in [design.md](design.md) are proposals, not current
-CLI instructions.
-
-## One-command mongosh demo
-
-From this repository, with Docker or Podman running:
+Inspect physical PostgreSQL records:
 
 ```bash
-./scripts/demo.sh
-# Or select the runtime explicitly:
-CONTAINER_RUNTIME=docker ./scripts/demo.sh
+documentdb-wal-audit-pg17 \
+  --wal-dir /srv/documentdb-wal-archive \
+  --show-postgres-records
 ```
 
-The script prefers Podman when both CLIs are installed. It pulls the public
-PostgreSQL 17 DocumentDB-local image, a Mongo image **only for `mongosh`**, and jq,
-builds the audit image, and starts a separate disposable database. Nothing is
-installed on your host, and existing databases are not accessed.
-The default DocumentDB image is pinned to multiarch digest
-`sha256:906670c630fc94e97b310a4951c5c0b81cb2853de4ccb21f75808031d4e2714d`
-from public `v1.0-RC2` commit
-`b0cb0dae85e8746f4e0b79c847894179b2f80d64`; the script verifies extension
-version `1.0-0`.
-
-Watch six steps: start DocumentDB, connect with `mongosh`, create a collection,
-insert three documents, update/replace/delete documents and create/drop an
-index, then capture closed WAL and run the audit container. The script compares
-all six document effects and every available BSON value against Mongo read-back,
-prints decoded events, and reports complete versus explicitly incomplete images.
-Step 4 uses containerized `jq` to pretty-print Mongo read-back as canonical
-Extended JSON. The final report also uses jq for the decoded WAL document
-effects and verification summary. The logical database is created implicitly by
-`createCollection()`; step 3 shows the command and verifies both exist.
-WAL capture begins before creation. The final report uses jq to show
-WAL-derived `databaseCreate` and `collectionCreate` catalog events and fails if
-either is absent. It rejects the former demo-injected `mongosh-observed`
-substitutes. `setup-catalog-records.jsonl` retains the underlying physical
-catalog records for inspection.
-It preserves the image's default WAL settings. The demo requires update and
-replacement `objectId` and `after` values to match mongosh exactly; unavailable
-old/delete images remain explicit. Lifecycle events infer committed catalog
-transitions but never claim the original DDL command.
-
-WAL, the collection manifest, Mongo expectations, and `audit.jsonl` are retained
-under ignored `demo-output/wal-audit-demo-*/` directories for inspection.
-Demo-owned containers, network, and database volume are removed on exit,
-including failure. No ports are published; `mongosh` connects within the private
-container network. `DOCUMENTDB_IMAGE` can override the public image with another
-compatible PG17 image; `MONGOSH_IMAGE` overrides the shell image.
-`JQ_IMAGE` overrides the jq image.
-
-## Build with containers
-
-PostgreSQL **18 is the default**. Compile a separate executable for PostgreSQL
-**17 or 16**; the executable must match the major that produced the WAL.
-`--postgres-major N` is an optional assertion that must match the compiled
-major; it cannot select a different decoder or convert WAL formats.
-
-With Podman on macOS, use its Linux virtual machine:
+Decode DocumentDB events as JSON Lines by supplying a relation manifest:
 
 ```bash
-podman machine start
-podman build --build-arg PG_MAJOR=18 -t documentdb-wal-audit:pg18 .
-podman run --rm documentdb-wal-audit:pg18 --help
-```
-
-Initialize the Podman machine first with `podman machine init` if none exists.
-Docker is an alternative; it uses the same Dockerfile:
-
-```bash
-docker build --build-arg PG_MAJOR=18 -t documentdb-wal-audit:pg18 .
-docker run --rm documentdb-wal-audit:pg18 --help
-```
-
-For a PostgreSQL 17 image:
-
-```bash
-podman build --build-arg PG_MAJOR=17 -t documentdb-wal-audit:pg17 .
-```
-
-Use `PG_MAJOR=16` and a `:pg16` image tag for PostgreSQL 16.
-The Makefile defaults to `PG_MAJOR=18`; inside the build container,
-`make PG_MAJOR=17` compiles the PostgreSQL 17 executable at
-`build/pg17/documentdb-wal-audit`.
-
-The build downloads pinned PostgreSQL 18.0, 17.0, or 16.0 source from official
-mirrors, verifies the published SHA-256 checksum, and compiles matching frontend
-support. C build tools,
-`libbson-dev`, `libsqlite3-dev`, and test-only Python are installed **inside the container**.
-Do not install PostgreSQL or dependencies on the host through Homebrew.
-The runtime image runs non-root with the binary at
-`/usr/local/bin/documentdb-wal-audit` as its entrypoint.
-
-### Development tests
-
-Build the test stage to run Python `unittest` integration tests as the
-container's non-root PostgreSQL user:
-
-```bash
-podman build --target test --build-arg PG_MAJOR=18 \
-  -t documentdb-wal-audit-tests:pg18 .
-```
-
-Substitute `docker` for `podman` if preferred, or change `PG_MAJOR` and the tag
-for 17 or 16. Tests exercise synthetic WAL and WAL produced by the matching
-real PostgreSQL server. The ordinary BSON integration fixture uses `bytea`
-columns with the relevant physical storage layout; it does **not** load the
-DocumentDB extension or establish full extension-version compatibility.
-Python is only a development-test dependency.
-
-### Mongo end-to-end test
-
-```bash
-podman build --target toolchain --build-arg PG_MAJOR=17 \
-  -t documentdb-wal-audit-toolchain:pg17 .
-podman run --rm --entrypoint sh -v "$PWD:/src" -w /src \
-  documentdb-wal-audit-toolchain:pg17 \
-  -c 'make -j2 PG_MAJOR=17 all native-test'
-tests/mongo/runner.sh
-```
-
-Uses Podman only: the pinned multi-platform PostgreSQL 17 image published from
-public [DocumentDB `v1.0-RC2`](https://github.com/documentdb/documentdb/tree/v1.0-RC2)
-(extension `1.0-0`), its native Mongo gateway, and container-only PyMongo
-3.11.0. The commands above build the matching Linux executable at
-`build/pg17/documentdb-wal-audit` and its PostgreSQL 17 toolchain container.
-`DOCUMENTDB_IMAGE` and `AUDIT_TOOLCHAIN_IMAGE` override these images;
-`EXPECTED_DOCUMENTDB_VERSION` overrides the required extension version;
-the producing PostgreSQL major is detected and must match the Linux executable.
-No host database, Python installation, or published ports are used.
-
-The runner checks acknowledged single/batch inserts, update, replacement,
-delete, index create/drop, collection rename, and cleanup against actual Mongo
-reads. Read-only SQL `COPY` captures closed WAL segments; public catalogs supply
-cluster provenance and separate half-open manifests before/after rename.
-Committed effect counts, namespaces, order, available canonical BSON images/IDs,
-and JSONL redaction are compared with driver-observed results.
-
-Two isolated passes run: **default** preserves the image's WAL/replica-identity
-settings and asserts explicit warnings for unavailable physical images;
-**precision** uses test-only `wal_level=logical` and
-`REPLICA IDENTITY FULL` to require complete before/after BSON with `--strict`.
-These fixture settings are not required by the offline runtime.
-`MONGO_WAL_MODE=default` or `precision` selects one pass.
-DDL is exercised through Mongo. Collection catalog transitions are decoded,
-while original command intent and index lifecycle decoding remain unsupported.
-
-Each run uses a private internal network and unique container/volume names,
-disables telemetry, and cleans up its containers/network/volume on failure too.
-Synthetic-only WAL, manifests, expected values, JSONL, and summaries remain in
-ignored `tests/mongo/artifacts/`; credentials are not archived.
-
-## Native build on a Linux server
-
-You can also compile and run directly on a Linux server; Docker and a local
-PostgreSQL development installation are not required. On Debian or Ubuntu,
-copy or check out this repository, then run from its root:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential bison flex pkg-config \
-  libbson-dev libsqlite3-dev curl ca-certificates bzip2 perl
-
-# Match the PostgreSQL major that produced the WAL: 16, 17, or 18.
-PG_MAJOR=17
-make -j2 PG_MAJOR="$PG_MAJOR" all native-test
-sudo install -m 0755 "build/pg${PG_MAJOR}/documentdb-wal-audit" \
-  "/usr/local/bin/documentdb-wal-audit-pg${PG_MAJOR}"
-
-"/usr/local/bin/documentdb-wal-audit-pg${PG_MAJOR}" --version
-```
-
-The build downloads and verifies matching PostgreSQL source and compiles its
-frontend support; it does not install or modify a PostgreSQL server. Omitting
-`PG_MAJOR` selects 18. Python is not required to build or run the tool.
-Keep the runtime `libbson` and SQLite libraries installed.
-
-For example, with an immutable archive at `/srv/documentdb-wal-archive` and
-a matching manifest at `/srv/documentdb-wal-manifest.json`, run as the account
-that can read them. This example uses `postgres`; substitute the actual data
-owner if your deployment uses another account:
-
-```bash
-sudo install -d -o postgres -g postgres -m 0700 /srv/wal-audit-spill
-sudo -u postgres "/usr/local/bin/documentdb-wal-audit-pg${PG_MAJOR}" \
+install -d -m 0700 "$HOME/wal-audit/spill"
+documentdb-wal-audit-pg17 \
   --wal-dir /srv/documentdb-wal-archive \
   --manifest /srv/documentdb-wal-manifest.json \
-  --spill-dir /srv/wal-audit-spill \
+  --spill-dir "$HOME/wal-audit/spill" \
   --format jsonl > audit.jsonl
 ```
 
-The installed executable is major-specific, just like the container image.
-Use archived WAL or a consistent snapshot, not a live server's changing
-`pg_wal` directory. A mounted data directory alone does not supply collection
-mappings: automatic `--pgdata` discovery is not implemented. Without a
-manifest, use `--show-postgres-records` for physical inspection instead of
-named document events. On macOS, use the container build above; these package
-installation commands are for Linux servers only.
-
-## Offline use
-
-Work with archived WAL or an immutable backup copy, not files actively being
-written by a running server. Retain contiguous input and provenance: cluster,
-timeline, segment size, and PostgreSQL major. Do not mix clusters or divergent
-timelines.
-
-Mount input WAL read-only. Output goes to stdout so the host can redirect it
-without granting the runtime write access to the archive. Transaction spooling
-needs writable storage separate from the input.
-
-For a local `wal/` archive and separate `spill/` directory, run from a non-root
-host account. Matching the container UID/GID to that account allows it to own
-the private spill directory:
+For a long-running audit, add a persistent cache so later WAL can reconstruct
+catalog state and update after-images from earlier records:
 
 ```bash
-mkdir -p spill
-chmod 700 spill
-podman run --rm --user "$(id -u):$(id -g)" \
-  --network none --read-only --cap-drop ALL \
-  --security-opt no-new-privileges \
-  -v "$PWD/wal:/wal:ro" -v "$PWD/spill:/spill:rw" \
-  documentdb-wal-audit:pg18 \
-  --wal-dir /wal --spill-dir /spill --format jsonl > audit.jsonl
+install -d -m 0700 "$HOME/wal-audit/state"
+documentdb-wal-audit-pg17 \
+  --wal-dir /srv/documentdb-wal-archive \
+  --manifest /srv/documentdb-wal-manifest.json \
+  --spill-dir "$HOME/wal-audit/spill" \
+  --cache "$HOME/wal-audit/state/cache.sqlite" \
+  --format jsonl > audit.jsonl
 ```
 
-The same command works with `docker` in place of `podman`; ensure the container
-user can read the archive and owns the spill directory. Bind-mount access and
-UID mapping depend on the container runtime. Do not solve spill access errors
-by making sensitive directories world-writable.
-For rootless Podman, `--userns keep-id` may be needed to preserve the archive
-owner's identity. Preserve private backup permissions; do not make WAL
-world-readable to accommodate the container.
+If the cache is lost and the archive contains contiguous WAL from the beginning
+of the retained history, rerun with `--rebuild-cache`. Use either `--wal-dir`
+or positional segment paths, never both. Read immutable archived WAL rather
+than a live server's changing `pg_wal` directory.
 
-For small workloads, an alternative is a private RAM-backed spool using the
-image's default UID/GID 65534:
-
-```bash
-podman run --rm --network none --read-only --cap-drop ALL \
-  --security-opt no-new-privileges \
-  -v "$PWD/wal:/wal:ro" \
-  --tmpfs /spill:rw,mode=0700,uid=65534,gid=65534 \
-  documentdb-wal-audit:pg18 \
-  --wal-dir /wal --spill-dir /spill --format jsonl > audit.jsonl
-```
-
-This requires that UID 65534 can already read the archive. A tmpfs consumes
-memory and is not a substitute for disk-backed spooling on large workloads;
-prefer a private owned host spool mount when logs or transactions are large.
-
-Use **either** `--wal-dir DIRECTORY` **or** positional segment paths, never
-both. To attach a manifest, mount its file read-only and add
-`--manifest /path/in/container/manifest.json`.
-
-### CLI
+### Options
 
 | Option | Meaning |
 |---|---|
@@ -313,20 +72,75 @@ both. To attach a manifest, mount its file read-only and add
 | `--redact-documents` | Suppress document values |
 | `--version`, `--help` | Display build version or help |
 
-Size arguments are positive decimal byte counts, without unit suffixes.
-The record minimum is 24 bytes. LSN bounds must be ordered (`from < to`) and
-use record boundaries, not arbitrary byte offsets. A range that excludes
-required transaction outcomes can leave effects unresolved; filtering is not
-a promise of complete transaction recovery.
-
 Exit statuses are **0** for success, **1** for reading/decoding/output errors,
 and **2** for invalid arguments. Keep stderr separate from JSONL stdout.
-Output preceding an error is partial; a nonzero exit status must not be ignored.
-Transactions lacking an outcome at end of input fail even when a transaction
-filter would hide their summaries. Without `--strict`, incomplete document
-reconstruction is reported with warnings; corruption and unresolved
-transaction outcomes still fail. `--strict` also makes incomplete document
-reconstruction fail, including missing old images for ordinary updates/deletes.
+Output preceding an error is partial. Without `--strict`, unavailable document
+images are reported with warnings; corruption and unresolved transaction
+outcomes still fail.
+
+## Run the demo
+
+From this repository, with Docker or Podman running:
+
+```bash
+./scripts/demo.sh
+# Or select the runtime explicitly:
+CONTAINER_RUNTIME=docker ./scripts/demo.sh
+```
+
+The script starts a disposable DocumentDB instance, runs a `mongosh` workload,
+captures its closed WAL, builds the audit tool, and verifies the decoded
+insert, update, replacement, and delete events against Mongo read-back. It also
+requires WAL-derived database and collection lifecycle events.
+
+The demo uses the public DocumentDB `v1.0-RC2` PostgreSQL 17 image and installs
+nothing on the host. It publishes no ports and removes its containers, network,
+and volume on exit. WAL, the generated manifest, expected values, and
+`audit.jsonl` remain under ignored `demo-output/wal-audit-demo-*/` directories.
+`DOCUMENTDB_IMAGE`, `MONGOSH_IMAGE`, and `JQ_IMAGE` can override the defaults.
+
+## Compile on Linux
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential bison flex pkg-config \
+  libbson-dev libsqlite3-dev curl ca-certificates bzip2 perl
+
+# Match the PostgreSQL major that produced the WAL: 16, 17, or 18.
+PG_MAJOR=17
+make -j2 PG_MAJOR="$PG_MAJOR" all native-test
+sudo install -m 0755 "build/pg${PG_MAJOR}/documentdb-wal-audit" \
+  "/usr/local/bin/documentdb-wal-audit-pg${PG_MAJOR}"
+
+"/usr/local/bin/documentdb-wal-audit-pg${PG_MAJOR}" --version
+```
+
+The build downloads and verifies matching PostgreSQL source and compiles its
+frontend support; it does not install or modify a PostgreSQL server. Omitting
+`PG_MAJOR` selects 18. Python is not required to build or run the tool.
+Keep the runtime `libbson` and SQLite libraries installed.
+The installed executable is major-specific. A data directory alone does not
+supply collection mappings; named document events require a manifest.
+On macOS, use the container build described below.
+
+## Scope
+
+The tool recognizes ordinary heap inserts, multi-inserts, updates, HOT updates,
+and deletes. A manifest maps physical relations to DocumentDB namespaces and
+enables BSON document events. Version 2 manifests also identify the collections
+catalog, allowing inferred database, collection, and view create, rename, and
+drop events.
+
+The SQLite cache retains catalog and tuple history across runs. It reconstructs
+prefix/suffix update after-images when earlier WAL or a full-page image supplied
+the predecessor tuple. Missing data remains explicit rather than invented.
+
+WAL records physical effects, not the original MongoDB command. Full TOAST
+reconstruction, index lifecycle decoding, `pgdata` bootstrap, and complete
+maintenance/pruning coverage are not implemented. See [design.md](design.md)
+for architecture and planned interfaces.
 
 ## Relation manifest
 
@@ -506,6 +320,61 @@ pending transactions and protect it like the WAL itself.
 No throughput or speedup is claimed. Archive storage, transaction size,
 BSON rendering, and output volume affect performance. Measure representative
 workloads and size output and spool storage accordingly.
+
+## Build with containers
+
+PostgreSQL 18 is the default. Set `PG_MAJOR` to 16 or 17 to build a matching
+binary for WAL produced by those versions.
+
+```bash
+podman machine start
+podman build --build-arg PG_MAJOR=18 -t documentdb-wal-audit:pg18 .
+podman run --rm documentdb-wal-audit:pg18 --help
+```
+
+Docker uses the same Dockerfile:
+
+```bash
+docker build --build-arg PG_MAJOR=18 -t documentdb-wal-audit:pg18 .
+docker run --rm documentdb-wal-audit:pg18 --help
+```
+
+To audit a local archive while keeping it read-only:
+
+```bash
+mkdir -p spill
+chmod 700 spill
+podman run --rm --user "$(id -u):$(id -g)" \
+  --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
+  -v "$PWD/wal:/wal:ro" -v "$PWD/spill:/spill:rw" \
+  documentdb-wal-audit:pg18 \
+  --wal-dir /wal --spill-dir /spill --format jsonl > audit.jsonl
+```
+
+### Development tests
+
+```bash
+podman build --target test --build-arg PG_MAJOR=18 \
+  -t documentdb-wal-audit-tests:pg18 .
+```
+
+### Mongo end-to-end test
+
+```bash
+podman build --target toolchain --build-arg PG_MAJOR=17 \
+  -t documentdb-wal-audit-toolchain:pg17 .
+podman run --rm --entrypoint sh -v "$PWD:/src" -w /src \
+  documentdb-wal-audit-toolchain:pg17 \
+  -c 'make -j2 PG_MAJOR=17 all native-test'
+tests/mongo/runner.sh
+```
+
+The runner uses the public
+[DocumentDB `v1.0-RC2`](https://github.com/documentdb/documentdb/tree/v1.0-RC2)
+image and verifies decoded events against real Mongo reads. Set
+`MONGO_WAL_MODE=default` or `precision` to run one mode instead of both.
+Artifacts remain under ignored `tests/mongo/artifacts/`.
 
 ## Data handling
 
